@@ -1,0 +1,31 @@
+{
+  "tradeList": [
+    {
+      "disseminationIdentifier": "900001",
+      "actionType": "NEWT",
+      "eventType": "TRAD",
+      "assetClass": "CR",
+      "executionTimestamp": "2026-10-28T12:00:00Z",
+      "notionalAmountLeg1": "2,500,000",
+      "notionalCurrencyLeg1": "USD",
+      "uniqueProductIdentifier": "UPI-FAKE-1",
+      "uniqueProductIdentifierShortName": "NA/CDS Corp Idx",
+      "uniqueProductIdentifierUnderlierName": "CDX.NA.IG",
+      "disseminationTimestamp": "2026-10-28T12:01:00Z",
+      "callAmountLeg2": "125000"
+    },
+    {
+      "disseminationIdentifier": "900002",
+      "actionType": "CORR",
+      "eventType": "TRAD",
+      "assetClass": "CR",
+      "executionTimestamp": "2026-10-28T12:05:00Z",
+      "notionalAmountLeg1": "5,000,000+",
+      "notionalCurrencyLeg1": "USD",
+      "uniqueProductIdentifierShortName": "NA/CDS Corp SN Sr",
+      "uniqueProductIdentifierUnderlierName": "EXAMPLE CORP",
+      "disseminationTimestamp": "2026-10-28T12:06:00Z"
+    }
+  ],
+  "errorList": []
+}
