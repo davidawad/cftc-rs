@@ -17,6 +17,7 @@ pub struct ResolvedEntity {
     pub scheme: String,
     pub id: String,
     pub ticker: Option<String>,
+    pub exch_code: Option<String>,
     pub lei: Option<String>,
     pub name: Option<String>,
     pub parent_lei: Option<String>,
@@ -63,8 +64,14 @@ pub fn parse_gleif_isins(v: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-/// Select the best OpenFIGI equity ticker result from an ISIN mapping response.
-pub fn parse_openfigi_equity_ticker(v: &serde_json::Value) -> Option<String> {
+/// Select the best OpenFIGI equity listing from an ISIN mapping response.
+/// OpenFIGI's `US` exchange code is its US composite and is preferred over
+/// individual US venues, which in turn are preferred over foreign listings.
+pub fn is_us_exchange_code(code: &str) -> bool {
+    code == "US" || matches!(code, "UN" | "UW" | "UA" | "UP" | "UQ") || code.starts_with("US")
+}
+
+pub fn parse_openfigi_equity_listing(v: &serde_json::Value) -> Option<(String, String)> {
     let rows: Vec<_> = v
         .as_array()?
         .iter()
@@ -83,16 +90,25 @@ pub fn parse_openfigi_equity_ticker(v: &serde_json::Value) -> Option<String> {
         })
         .collect();
     choices.sort_by_key(|r| {
-        if r.get("exchCode")
-            .and_then(|x| x.as_str())
-            .is_some_and(|x| x.starts_with("US"))
-        {
+        let code = r.get("exchCode").and_then(|x| x.as_str()).unwrap_or("");
+        if code == "US" {
             0
-        } else {
+        } else if is_us_exchange_code(code) {
             1
+        } else {
+            2
         }
     });
-    choices.first()?.get("ticker")?.as_str().map(str::to_owned)
+    let best = choices.first()?;
+    Some((
+        best.get("ticker")?.as_str()?.to_owned(),
+        best.get("exchCode")?.as_str()?.to_owned(),
+    ))
+}
+
+/// Select only the ticker from the best OpenFIGI equity listing.
+pub fn parse_openfigi_equity_ticker(v: &serde_json::Value) -> Option<String> {
+    parse_openfigi_equity_listing(v).map(|(ticker, _)| ticker)
 }
 
 /// Order issuer ISINs so likely US equity identifiers are tried before the long tail.
@@ -116,12 +132,12 @@ pub fn order_issuer_isins(isins: &[String]) -> Vec<String> {
 
 /// Build output rows and propagate each ISIN's resolution to its co-occurring RED key.
 pub fn build_rows(
-    entities: &BTreeMap<String, (String, String, String, String, String)>,
+    entities: &BTreeMap<String, (String, String, String, String, String, String)>,
     red_by_isin: &BTreeMap<String, String>,
     filter: Option<&std::collections::BTreeSet<String>>,
 ) -> Vec<ResolvedEntity> {
     let mut rows = Vec::new();
-    for (isin, (ticker, lei, name, parent, parent_name)) in entities {
+    for (isin, (ticker, exch_code, lei, name, parent, parent_name)) in entities {
         if filter.is_some_and(|f| !f.contains(&ticker.to_ascii_uppercase())) {
             continue;
         }
@@ -132,6 +148,7 @@ pub fn build_rows(
                 scheme: scheme.into(),
                 id: id.into(),
                 ticker: Some(ticker.clone()),
+                exch_code: Some(exch_code.clone()),
                 lei: Some(lei.clone()),
                 name: Some(name.clone()),
                 parent_lei: Some(parent.clone()),
@@ -177,11 +194,16 @@ mod resolve_tests {
         let figi: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/entities/openfigi.json")).unwrap();
         assert_eq!(parse_openfigi_equity_ticker(&figi).as_deref(), Some("USX"));
+        assert_eq!(
+            parse_openfigi_equity_listing(&figi),
+            Some(("USX".into(), "US".into()))
+        );
         let mut e = BTreeMap::new();
         e.insert(
             "US0000000001".into(),
             (
                 "USX".into(),
+                "US".into(),
                 "L".into(),
                 "Name".into(),
                 "P".into(),
@@ -194,6 +216,7 @@ mod resolve_tests {
         let rows = build_rows(&e, &red, Some(&f));
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].scheme, "RED");
+        assert_eq!(rows[0].exch_code.as_deref(), Some("US"));
         assert!(build_rows(&e, &red, Some(&["OTHER".to_owned()].into_iter().collect())).is_empty());
     }
 
@@ -208,6 +231,20 @@ mod resolve_tests {
         assert_eq!(
             parse_openfigi_equity_ticker(&multi).as_deref(),
             Some("GOOD")
+        );
+        let listings = serde_json::json!([{"data":[
+            {"ticker":"CCOGBP","exchCode":"ER","marketSector":"Equity","securityType":"Common Stock"},
+            {"ticker":"CCO","exchCode":"US","marketSector":"Equity","securityType":"Common Stock"},
+            {"ticker":"CCO.N","exchCode":"UN","marketSector":"Equity","securityType":"Common Stock"}
+        ]}]);
+        assert_eq!(
+            parse_openfigi_equity_listing(&listings),
+            Some(("CCO".into(), "US".into()))
+        );
+        let foreign_only = serde_json::json!([{"data":[{"ticker":"CCOGBP","exchCode":"ER","marketSector":"Equity","securityType":"Common Stock"}]}]);
+        assert_eq!(
+            parse_openfigi_equity_listing(&foreign_only),
+            Some(("CCOGBP".into(), "ER".into()))
         );
         let isins = vec![
             "FR0000000001".into(),

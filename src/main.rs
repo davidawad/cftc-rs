@@ -340,8 +340,8 @@ fn entities_resolve(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use cftc::cds::entity_keys;
     use cftc::entity::{
-        build_rows, parse_gleif_isins, parse_gleif_lei, parse_gleif_parent,
-        parse_openfigi_equity_ticker,
+        build_rows, is_us_exchange_code, parse_gleif_isins, parse_gleif_lei, parse_gleif_parent,
+        parse_openfigi_equity_listing,
     };
     use std::collections::{BTreeMap, BTreeSet};
     let filter = tickers
@@ -381,7 +381,7 @@ fn entities_resolve(
         }
     }
     let mut resolved = BTreeMap::new();
-    let mut parent_tickers = BTreeMap::<String, Option<String>>::new();
+    let mut parent_tickers = BTreeMap::<String, Option<(String, String)>>::new();
     let mut isins = BTreeSet::new();
     for isin in pairs.keys() {
         isins.insert(isin.clone());
@@ -400,10 +400,17 @@ fn entities_resolve(
         let parent_response = cached_entity_get(client, &purl, offline)?;
         let (parent, parent_name) = parse_gleif_parent(parent_response.as_ref(), &lei, &name);
         match parent_tickers.get(&parent) {
-            Some(Some(ticker)) => {
+            Some(Some((ticker, exch_code))) => {
                 resolved.insert(
                     isin.clone(),
-                    (ticker.clone(), lei, name, parent, parent_name),
+                    (
+                        ticker.clone(),
+                        exch_code.clone(),
+                        lei,
+                        name,
+                        parent,
+                        parent_name,
+                    ),
                 );
                 continue;
             }
@@ -431,7 +438,7 @@ fn entities_resolve(
         parent_isins.push(isin.clone());
         parent_isins.sort();
         parent_isins.dedup();
-        let mut ticker = None;
+        let mut listing = None;
         let max_isins = max_isins_per_issuer;
         parent_isins = cftc::entity::order_issuer_isins(&parent_isins);
         if parent_isins.len() > max_isins {
@@ -458,22 +465,40 @@ fn entities_resolve(
                 offline,
                 std::env::var("OPENFIGI_API_KEY").ok().as_deref(),
             )? {
-                ticker = parse_openfigi_equity_ticker(&v);
-                if ticker.is_some() {
+                if let Some(candidate) = parse_openfigi_equity_listing(&v) {
+                    let candidate_is_us = is_us_exchange_code(&candidate.1);
+                    let current_is_us = listing
+                        .as_ref()
+                        .is_some_and(|x: &(String, String)| is_us_exchange_code(&x.1));
+                    if listing.is_none()
+                        || (candidate_is_us && !current_is_us)
+                        || candidate.1 == "US"
+                    {
+                        listing = Some(candidate);
+                    }
+                }
+                if listing.as_ref().is_some_and(|x| x.1 == "US") {
                     break;
                 }
             }
         }
-        parent_tickers.insert(parent.clone(), ticker.clone());
+        parent_tickers.insert(parent.clone(), listing.clone());
         let hits = parent_tickers.values().filter(|t| t.is_some()).count();
         eprintln!(
             "{}",
             json!({"event": "issuer_resolved", "isin": isin, "parent_lei": parent,
-                   "parent_name": parent_name, "ticker": ticker,
+                   "parent_name": parent_name, "ticker": listing.as_ref().map(|x| &x.0),
+                   "exch_code": listing.as_ref().map(|x| &x.1),
                    "issuers_done": parent_tickers.len(), "tickers": hits})
         );
-        if let Some(t) = ticker {
-            resolved.insert(isin.clone(), (t, lei, name, parent, parent_name));
+        if let Some((t, exch_code)) = listing {
+            if !is_us_exchange_code(&exch_code) {
+                eprintln!(
+                    "{}",
+                    json!({"event":"warning", "message":"ticker has no US composite or US venue listing", "ticker":t, "exch_code":exch_code, "isin":isin})
+                );
+            }
+            resolved.insert(isin.clone(), (t, exch_code, lei, name, parent, parent_name));
         }
     }
     let rows = build_rows(&resolved, &pairs, filter.as_ref());
