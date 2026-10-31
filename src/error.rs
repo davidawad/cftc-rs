@@ -24,8 +24,10 @@ pub enum Error {
         #[source]
         source: csv::Error,
     },
-    #[error("{report} not in cache and client is offline")]
+    #[error("{report} not in archive or cache and client is offline")]
     NotCached { report: ReportId },
+    #[error("archive error for {report}: {message}")]
+    Archive { report: ReportId, message: String },
     #[error("ticker response error: {0}")]
     Ticker(String),
     #[error("no cache directory could be determined; set one with Client::with_cache_dir")]

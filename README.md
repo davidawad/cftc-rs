@@ -34,11 +34,12 @@ The library crate is named `cftc` and the installed command is `cftc`.
 
 ## CLI
 
-All date ranges are inclusive. The cache defaults to the platform cache directory; set `CFTC_RS_CACHE` or pass the global `--cache-dir` option to change it. Use `--offline` to read only cached reports. The entity map for ticker lookup is a CSV with `scheme,id,ticker,lei,name` columns and can be set with `CFTC_RS_ENTITY_MAP` or `--map`.
+All date ranges are inclusive. The cache defaults to the platform cache directory; set `CFTC_RS_CACHE` or pass the global `--cache-dir` option to change it. Use `--archive <dir>` (or `CFTC_RS_ARCHIVE`) to read the read-only DTCC PPD archive before the cache and network. The archive uses `data/<cftc|sec>/<YYYY>/<STEM>.zip.zst` and may include a `MANIFEST.tsv` for SHA-256 and byte-count verification. Use `--offline` to read only the archive and cache. The entity map for ticker lookup is a CSV with `scheme,id,ticker,lei,name` columns and can be set with `CFTC_RS_ENTITY_MAP` or `--map`.
 
 ```bash
 # Fetch SEC and CFTC credit reports for a date range
 cftc fetch --from 2025-05-01 --to 2025-05-09
+cftc --archive /path/to/dtcc-ppd-archive fetch --from 2025-05-01 --to 2025-05-09 --offline
 cftc fetch --from 2025-05-01 --to 2025-05-09 --intraday
 
 # Emit raw records as JSON Lines
@@ -90,7 +91,7 @@ let daily = daily_series(&prints, &days, from, to);
 # Ok::<(), cftc::Error>(())
 ```
 
-`Client::with_cache_dir(path).offline(true)` can be used for cache-only analysis. `Client::days(&query)` yields each available report day without collecting all records first.
+`Client::with_cache_dir(path).with_archive(path).offline(true)` can be used for archive and cache only analysis. `Client::days(&query)` yields each available report day without collecting all records first.
 
 ## Disseminated value conventions
 

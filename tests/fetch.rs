@@ -88,3 +88,88 @@ fn offline_slice_probe_reads_cached_sequences_and_stops_at_missing_marker() {
     assert_eq!(records[0].dissemination_id, "slice-1");
     assert_eq!(records[1].dissemination_id, "slice-2");
 }
+
+fn archive_client(dir: &std::path::Path, report: ReportId, zip: &[u8]) -> Client {
+    let client = Client::with_cache_dir(dir.join("cache"))
+        .with_archive(dir)
+        .offline(true);
+    let path = client.archive_path(&report).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, zstd::stream::encode_all(zip, 0).unwrap()).unwrap();
+    client
+}
+
+#[test]
+fn archive_hit_decompresses_report_zip() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = ReportId::cumulative(Regulator::Cftc, AssetClass::Credits, d(2025, 1, 6));
+    let csv = b"synthetic archive CSV";
+    let zip = common::zip(&format!("{}.csv", report.file_stem()), csv);
+    let client = archive_client(dir.path(), report, &zip);
+    use sha2::Digest;
+    let digest = format!("{:x}", sha2::Sha256::digest(&zip));
+    std::fs::write(
+        dir.path().join("MANIFEST.tsv"),
+        format!("{}\t{}\t{}\n", report.file_stem(), digest, zip.len()),
+    )
+    .unwrap();
+
+    assert_eq!(client.csv_bytes(&report).unwrap().unwrap(), csv);
+}
+
+#[test]
+fn archive_miss_falls_through_to_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = ReportId::cumulative(Regulator::Sec, AssetClass::Credits, d(2025, 1, 6));
+    let csv = b"cached synthetic CSV";
+    let zip = common::zip(&format!("{}.csv", report.file_stem()), csv);
+    let client = Client::with_cache_dir(dir.path().join("cache"))
+        .with_archive(dir.path().join("archive"))
+        .offline(true);
+    let path = client.cache_path(&report);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, zip).unwrap();
+
+    assert_eq!(client.csv_bytes(&report).unwrap().unwrap(), csv);
+}
+
+#[test]
+fn archive_manifest_mismatch_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = ReportId::cumulative(Regulator::Cftc, AssetClass::Credits, d(2025, 1, 6));
+    let zip = common::zip(&format!("{}.csv", report.file_stem()), b"contents");
+    let client = archive_client(dir.path(), report, &zip);
+    std::fs::write(
+        dir.path().join("MANIFEST.tsv"),
+        format!(
+            "{}\t{}\t{}\n",
+            report.file_stem(),
+            "00".repeat(32),
+            zip.len()
+        ),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        client.zip_bytes(&report),
+        Err(Error::Archive { .. })
+    ));
+}
+
+#[test]
+fn offline_archive_serves_reports_and_rejects_uncached_misses() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = ReportId::cumulative(Regulator::Cftc, AssetClass::Credits, d(2025, 1, 6));
+    let zip = common::zip(
+        &format!("{}.csv", report.file_stem()),
+        b"offline synthetic CSV",
+    );
+    let client = archive_client(dir.path(), report, &zip);
+
+    assert!(client.zip_bytes(&report).unwrap().is_some());
+    let absent = ReportId::cumulative(Regulator::Cftc, AssetClass::Credits, d(2025, 1, 7));
+    assert!(matches!(
+        client.zip_bytes(&absent),
+        Err(Error::NotCached { .. })
+    ));
+}

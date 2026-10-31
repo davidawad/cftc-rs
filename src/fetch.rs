@@ -8,6 +8,7 @@
 use crate::error::{Error, Result};
 use crate::source::{ReportId, DEFAULT_BASE_URL};
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -16,6 +17,7 @@ use std::time::Duration;
 pub struct Client {
     base_url: String,
     cache_dir: PathBuf,
+    archive_dir: Option<PathBuf>,
     offline: bool,
     agent: ureq::Agent,
 }
@@ -37,6 +39,7 @@ impl Client {
         Self {
             base_url: DEFAULT_BASE_URL.to_string(),
             cache_dir: cache_dir.into(),
+            archive_dir: None,
             offline: false,
             agent,
         }
@@ -47,7 +50,22 @@ impl Client {
         self
     }
 
-    /// Never touch the network; serve only what is already cached.
+    /// Read archived DTCC ZIPs from the read-only archive directory before cache or network.
+    pub fn with_archive(mut self, archive_dir: impl Into<PathBuf>) -> Self {
+        self.archive_dir = Some(archive_dir.into());
+        self
+    }
+
+    pub fn archive_path(&self, report: &ReportId) -> Option<PathBuf> {
+        self.archive_dir.as_ref().map(|root| {
+            root.join("data")
+                .join(report.regulator.path())
+                .join(report.date.format("%Y").to_string())
+                .join(format!("{}.zip.zst", report.file_stem()))
+        })
+    }
+
+    /// Never touch the network; serve only reports already in the archive or cache.
     pub fn offline(mut self, offline: bool) -> Self {
         self.offline = offline;
         self
@@ -68,8 +86,13 @@ impl Client {
         self.cache_path(report).with_extension("missing")
     }
 
-    /// Raw zip bytes for a report, from cache or network. `None` = DTCC has no such file.
+    /// Raw zip bytes for a report, from archive, cache, or network. `None` = DTCC has no such file.
     pub fn zip_bytes(&self, report: &ReportId) -> Result<Option<Vec<u8>>> {
+        if let Some(path) = self.archive_path(report) {
+            if path.exists() {
+                return self.read_archive(report, &path).map(Some);
+            }
+        }
         let path = self.cache_path(report);
         let is_today = report.date >= Utc::now().date_naive();
         if path.exists()
@@ -97,6 +120,69 @@ impl Client {
                 Ok(None)
             }
         }
+    }
+
+    fn read_archive(&self, report: &ReportId, path: &Path) -> Result<Vec<u8>> {
+        let compressed = std::fs::read(path)?;
+        let mut decoder = zstd::stream::read::Decoder::new(compressed.as_slice()).map_err(|e| {
+            Error::Archive {
+                report: *report,
+                message: format!("could not decompress {}: {e}", path.display()),
+            }
+        })?;
+        let mut zip = Vec::new();
+        decoder.read_to_end(&mut zip).map_err(|e| Error::Archive {
+            report: *report,
+            message: format!("could not decompress {}: {e}", path.display()),
+        })?;
+        self.verify_archive_manifest(report, &zip)?;
+        Ok(zip)
+    }
+
+    fn verify_archive_manifest(&self, report: &ReportId, zip: &[u8]) -> Result<()> {
+        let Some(root) = &self.archive_dir else {
+            return Ok(());
+        };
+        let manifest = root.join("MANIFEST.tsv");
+        let contents = match std::fs::read_to_string(&manifest) {
+            Ok(contents) => contents,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        for line in contents.lines() {
+            let mut fields = line.split('\t');
+            if fields.next() != Some(report.file_stem().as_str()) {
+                continue;
+            }
+            let digest = fields.next().ok_or_else(|| Error::Archive {
+                report: *report,
+                message: "malformed MANIFEST.tsv entry (missing SHA-256)".into(),
+            })?;
+            let expected_bytes = fields.next().ok_or_else(|| Error::Archive {
+                report: *report,
+                message: "malformed MANIFEST.tsv entry (missing byte count)".into(),
+            })?;
+            let actual_digest = format!("{:x}", Sha256::digest(zip));
+            if !digest.eq_ignore_ascii_case(&actual_digest) {
+                return Err(Error::Archive {
+                    report: *report,
+                    message: format!(
+                        "SHA-256 mismatch (manifest {digest}, archive {actual_digest})"
+                    ),
+                });
+            }
+            if expected_bytes.parse::<usize>().ok() != Some(zip.len()) {
+                return Err(Error::Archive {
+                    report: *report,
+                    message: format!(
+                        "byte count mismatch (manifest {expected_bytes}, archive {})",
+                        zip.len()
+                    ),
+                });
+            }
+            break;
+        }
+        Ok(())
     }
 
     fn download(&self, report: &ReportId) -> Result<Option<Vec<u8>>> {

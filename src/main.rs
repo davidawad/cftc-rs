@@ -23,6 +23,9 @@ struct Cli {
     /// Cache directory (default: platform cache dir / cftc-rs).
     #[arg(long, global = true, env = "CFTC_RS_CACHE")]
     cache_dir: Option<PathBuf>,
+    /// Read-only DTCC archive directory (also settable with CFTC_RS_ARCHIVE).
+    #[arg(long, global = true, env = "CFTC_RS_ARCHIVE")]
+    archive: Option<PathBuf>,
     /// Use only cached files; never hit the network.
     #[arg(long, global = true)]
     offline: bool,
@@ -167,14 +170,17 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let client = match &cli.cache_dir {
+    let mut client = match &cli.cache_dir {
         Some(d) => Client::with_cache_dir(d),
         None => Client::new()?,
+    };
+    if let Some(archive) = &cli.archive {
+        client = client.with_archive(archive);
     }
-    .offline(cli.offline);
+    let client = client.offline(cli.offline);
     log(
         "start",
-        json!({"cache_dir": client.cache_dir(), "offline": cli.offline}),
+        json!({"cache_dir": client.cache_dir(), "archive": cli.archive, "offline": cli.offline}),
     );
     let started = Instant::now();
     let out = std::io::stdout().lock();
